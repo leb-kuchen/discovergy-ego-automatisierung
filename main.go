@@ -6,7 +6,7 @@ import (
 	"io/ioutil"
 	"fmt"
 	"time"
-//	"strconv"
+	."strconv"
 	"encoding/json"
 	"math"
 	"strings"
@@ -17,18 +17,33 @@ import (
 // option to change data
 
 func main() {
-	interval := 1
-	timeInt := TimeAtUnix(interval)
+	interval := 5
+	updateTimer := time.Duration(5 * time.Second)
 	lastCheck := newCheckLastNegativePower(false)
-	fmt.Println(lastCheck)
-	res := basicAuth(timeInt)
-	//fmt.Println(res)
 	egoUrls :=  NewStructEgoData()
 	statusUrl := egoUrls.status("amp", "psm", "frc")
-	egoStatusStruct := getEgoStatus(statusUrl)
-	fmt.Println(egoUrls)
-	dGyData := ParseDiscovergy(res)
-	MeasureData(dGyData, egoStatusStruct, &lastCheck)
+	for {
+		tx1 := make(chan int)
+		tx2 := make(chan EgoStatus)
+		tx3 := make(chan string)
+		timeInt := TimeAtUnix(interval)
+	//	start := time.Now()
+		go func() {	
+			time.Sleep(updateTimer)
+			tx1 <- 0
+		}()
+		go basicAuth(timeInt, tx3)
+		go getEgoStatus(statusUrl, tx2)
+		res := <- tx3
+		egoStatusStruct := <- tx2
+		//fmt.Println("Befor Parse", time.Since(start))
+		dGyData := ParseDiscovergy(res)
+		MeasureData(dGyData, egoStatusStruct, &lastCheck, egoUrls)
+	//	fmt.Println("After", time.Since(start))
+		<- tx1
+	//	fmt.Println("End", time.Since(start))
+	
+	}
 }
 type CheckLastNegativePower struct{
 	beginCheck time.Time
@@ -56,66 +71,141 @@ func TimeAtUnix(interval int) int {
 func TimeToInt(time time.Time) int {
 	return int(time.UnixMilli())
 }
-// Anschalten Logik
-func MeasureData(dGyData []DiscovergyData, egoStatus EgoStatus, lastNegative *CheckLastNegativePower) {
+func EgoUrlIsEmpty(baseUrl, curUrl string) bool {
+	return baseUrl == curUrl
+}
+func MeasureData(dGyData []DiscovergyData, egoStatus EgoStatus, lastNegative *CheckLastNegativePower, egoUrls StructEgoData) {
+	if len(dGyData) == 0 {
+		log.Fatal("Keine Daten von Discovergy")
+	}
 	min := CalculateChangeOfAmpere(dGyData[0].Values)
 	for _, val := range dGyData {
 		change := CalculateChangeOfAmpere(val.Values)
-		newPower := egoStatus.Amp + change
+		//newPower := egoStatus.Amp + change
+		// n Minuten Minimum zum Hochschalten
 		if change < min {
 			min = change
 		}
-		// if fsr on 
-		if newPower < 6 && !lastNegative.checkCurrent{
-			lastNegative.checkNow() 
-			fmt.Println("IN FÜNF MINUTEN RUNTERSCHALTEN")
-		}
-		if lastNegative.checkCurrent {
-			if newPower >= 6 && val.Time > int64(TimeToInt(lastNegative.beginCheck)){
-				lastNegative.stopCheck()
-			} else if time.Since(lastNegative.beginCheck) > time.Duration(5 * time.Minute) {
-				fmt.Println("AUSCHALTEN")
-			}
-		}
-		fmt.Println(lastNegative.checkCurrent, lastNegative.beginCheck)
-		if change < 0{
-			fmt.Println("SOFORT RUNTERSCHALTEN", change, newPower)
-		}
-	
-	//	fmt.Println("amp", egoStatus.Amp, "psm", egoStatus.Psm, "newPower", newPower)
-		//fmt.Println(change, min)
 	}
 	// Frc 1 Off 2 On 0 Auto
-	if min > 0 {
-		fmt.Println("HOCHSCHALTEN", min)
-		if egoStatus.Frc == 1 {
-			fmt.Println("Anschalten")
-		}
-				
+	lastPower := CalculateChangeOfAmpere(dGyData[len(dGyData)-1].Values)
+	//fmt.Println(lastPower, min)
+	egoSetBaseUrl := egoUrls.EGO_URL_SET + "?"
+	queryList := []string{}
+	DecreasePower(lastPower,  egoStatus, &queryList)
+	IncreasePower(min, egoStatus, &queryList)
+	TurnOnPower(min, egoStatus, &queryList)
+	TurnOffPower(lastPower, egoStatus, lastNegative, dGyData[len(dGyData)-1], &queryList)
+	egoUrlSetString := MakeEgoUrlSet(egoSetBaseUrl, queryList)
+	if !EgoUrlIsEmpty(egoSetBaseUrl, egoUrlSetString) {
+		fmt.Println(time.Now())
+		fmt.Println("Set => ", egoUrlSetString)
+		MakeGetRequest(egoUrlSetString)
 	}
-	fmt.Println(egoStatus.Amp + min)
 }
-// 0 check failed stop
-// 1 check failed continue
-// 2 check succesful
-func (ln *CheckLastNegativePower) doCheck(newPower int64) int64{
-	if !(newPower <= 6) {
-		return 2
-	}	
-	if !ln.checkCurrent{
-		return 2
+func checkPowerMin(newPower int64) int64 {
+	if newPower > 6 {
+		return newPower
 	}
-	if time.Since(ln.beginCheck) > time.Duration(5 * time.Minute) {
-		return 0
+	return 6
+}
+func (es EgoStatus) curEqNewPower(newPower int64) bool {
+	return es.Amp == newPower
+
+}
+// Stromstäkre auf 16A regulieren
+func checkPowerMax(newPower int64) int64 {
+	if newPower < 16 {
+		return newPower
 	}
-	return 1
+	return 16
+}
+func DecreasePower(powerNet int64, es EgoStatus, queryList *[]string) {
+	// Sofort runterschalten wenn Unterschuss,
+	// jedoch mindestens auf 6A
+	if powerNet >= 0 {
+		return
+	}
+	newPower := checkPowerMin(powerNet + es.Amp)
+	if es.curEqNewPower(newPower) {
+		return
+	}
+	fmt.Println("Runtergeschaltet auf", newPower, "um", time.Now())
+	EgoUrlSetUpdate(queryList, "amp", Itoa(int(newPower)))
+}
+func (a *CheckLastNegativePower) CheckIfMinimumReached(currentPower int64, diGyData DiscovergyData){
+		if int(diGyData.Time) > TimeToInt(a.beginCheck) && currentPower >= 6{
+			a.stopCheck()
+		}
+}
+func (a *CheckLastNegativePower) CheckIfBelowMinimum(currentPower int64, egoStatus EgoStatus ) {
+	//fmt.Println(egoStatus.Frc)
+	if !a.checkCurrent && currentPower < 6 && egoStatus.Frc != 1{
+		a.checkNow()
+	}
+}
+func (a CheckLastNegativePower) TimeExceeded() bool{
+	return time.Since(a.beginCheck) > time.Duration(5 * time.Minute) && a.checkCurrent
+}
+func IncreasePower(powerNet int64, es EgoStatus, queryList *[]string){
+	// Stromstärke nicht öndern, wenn n Minuten Minimium der alten Stromstärke entstrpicht
+	// oder keinen Überschuss gibt.
+	if powerNet <= 0 {
+		return 
+	}
+	// n Minuten Minimum + aktuelle Stromstörke ist die neue Stromstärke.
+	powerMin := checkPowerMax(powerNet + es.Amp)
+	if es.curEqNewPower(powerMin) {
+		return
+	}
+	// Ampere auf n Minuten Minimium setzen.
+	fmt.Println("Hochgeschaltet auf", powerMin, "um", time.Now())
+	EgoUrlSetUpdate(queryList, "amp", Itoa(int(powerMin)))
+}
+func TurnOnPower(powerNet int64, es EgoStatus, queryList *[]string){
+	powerMin := checkPowerMax(powerNet + es.Amp)	
+	if powerMin < 6 {
+		return
+	}
+	// Anschalten wenn n Minuten Überschuss
+	// Frc: 0 Auto, 1 Aus, 2 An
+	switch es.Frc {
+			case 0, 1: 
+				fmt.Println("Angeschaltet um ", time.Now())
+				fmt.Printf("aktuell niedrigste Stromstärke: %v\n", powerMin)
+				EgoUrlSetUpdate(queryList, "frc", "2")			
+	} 
+}
+func CurrentStatus() {
+
+
+
+
+}
+
+func TurnOffPower(powerNet int64, es EgoStatus, ln *CheckLastNegativePower, lastPower DiscovergyData, queryList *[]string) {
+	totalPower := powerNet + es.Amp
+	ln.CheckIfBelowMinimum(totalPower, es)
+	if !ln.checkCurrent {
+		return 
+	}
+	/*if es.Frc == 1 {
+		return
+	}
+	*/
+	ln.CheckIfMinimumReached(totalPower, lastPower)
+	if ln.TimeExceeded() {
+		fmt.Println("Ausgeschaltet um", time.Now())
+		fmt.Printf("aktuelle Stromstärke: %v\n", totalPower)
+		EgoUrlSetUpdate(queryList, "frc", "1")	
+		ln.stopCheck()
+	}
 }
 func CalculateChangeOfAmpere(dGyPowData DiscovergyPowerData) int64{
 	changeOfAmpere := -(float64(dGyPowData.Power) / float64(dGyPowData.Phase1Voltage))
 	return int64(math.Floor(changeOfAmpere))
 }
-func basicAuth(timeAt int) string {
-	fmt.Println("TimeAt", timeAt)
+func basicAuth(timeAt int, tx3 chan string) {
     url := fmt.Sprintf("%s/readings?meterId=%s&from=%d&resultion=raw",
     BASE_URL, METER_ID, timeAt)
     client := &http.Client{}
@@ -129,8 +219,7 @@ func basicAuth(timeAt int) string {
     if err != nil{
     	log.Fatal(err)
     }
-    fmt.Println("Done")
-    return string(bodyText)
+    tx3 <- string(bodyText)
    
 }
 func ParseDiscovergy(dataStr string) []DiscovergyData {
@@ -182,21 +271,30 @@ func (ego *StructEgoData) status(querys ...string) string {
 	base := ego.EGO_URL_STATUS + "?filter="
 	return base + strings.Join(querys, ",")
 }
-// Logik hoch dann runterschalten 
-// var LastCheckIncreasePower 
 
 type EgoStatus struct {
 	Amp, Psm, Frc int64
 }
-func getEgoStatus(url string) EgoStatus {
+func getEgoStatus(url string, tx2 chan EgoStatus) {
 	statusStr := MakeGetRequest(url)
 	egoStatus := EgoStatus{}
 	json.Unmarshal([]byte(statusStr), &egoStatus)
-	return egoStatus
+	tx2 <- egoStatus
 }
-
-func GetEgoUrl(prefix, suffix, value string) string {
-	return fmt.Sprintf("%s?%s=%s", prefix, suffix, value)
+type EgoUrlSet struct {
+	Url string
+}
+func newEgoUrlSet(url string) EgoUrlSet {
+	return 	EgoUrlSet{ url }
+}
+func (a *EgoUrlSet)Update(suffix, value string){
+	*a =  newEgoUrlSet(fmt.Sprintf("%s&%s=%s", a.Url, suffix, value))
+}
+func EgoUrlSetUpdate(queryList *[]string, suffix, value string) {
+	 *queryList = append(*queryList, fmt.Sprintf("%s=%s", suffix, value))
+}
+func MakeEgoUrlSet(baseUrlSet string, queryList []string) string {
+	return baseUrlSet + strings.Join(queryList, "&")
 }
 func MakeGetRequest(url string) string {
    resp, err := http.Get(url)
