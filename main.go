@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -8,6 +9,7 @@ import (
 	. "strconv"
 	"strings"
 	"time"
+	//	"sync"
 	//"os"
 )
 
@@ -20,29 +22,67 @@ import (
 
 func main() {
 	interval := 5
-	updateTimer := time.Duration(5 * time.Second)
+	updateTimer := time.Duration(1 * time.Second)
+	warnTimer := time.Duration(10 * time.Second)
+	timeoutTimer := time.Duration(time.Minute * 10)
 	lastCheck := newCheckLastNegativePower(false)
 	egoUrls := NewStructEgoData()
 	statusUrl := egoUrls.status("amp", "psm", "frc", "lcctc", "alw")
+	lastPowerOn := time.Now()
 	for {
-		tx1 := make(chan int)
+		start := time.Now()
+		forever := make(chan struct{})
+		ctx, cancel := context.WithCancel(context.Background())
+		sleep := time.After(updateTimer)
+		warn := time.After(warnTimer)
+		timeout := time.After(timeoutTimer)
+		//	var exitWarn sync.WaitGroup
+		//	tx1 := make(chan None)
+		//	tx4 := make(chan None)
 		tx2 := make(chan EgoStatus)
 		tx3 := make(chan []DiscovergyData)
 		timeInt := TimeAtUnix(interval)
-		//	start := time.Now()
-		go func() {
-			time.Sleep(updateTimer)
-			tx1 <- 0
-		}()
 		go getEgoStatus(statusUrl, tx2)
 		go ParseDiscovergy(timeInt, tx3)
+		go func(ctx context.Context) {
+			select {
+			case <-ctx.Done():
+				forever <- struct{}{}
+				return
+			case <-warn:
+				for {
+					select {
+					case <-ctx.Done():
+						forever <- struct{}{}
+						return
+					default:
+						log.Printf("Warnung: Kein Daten seit %v. Abschaltung in %v\n", time.Since(start), timeoutTimer-time.Since(start))
+						time.Sleep(5 * time.Second)
+					}
+				}
+			}
+
+		}(ctx)
+		go func(ctx context.Context) {
+			for {
+				select {
+				case <-ctx.Done():
+					forever <- struct{}{}
+					return
+				case <-timeout:
+					log.Fatal("Timeout")
+				}
+			}
+		}(ctx)
 		dGyData := <-tx3
 		egoStatusStruct := <-tx2
 		//fmt.Println("Befor Parse", time.Since(start))
-		MeasureData(dGyData, egoStatusStruct, &lastCheck, egoUrls)
+		MeasureData(dGyData, egoStatusStruct, &lastCheck, egoUrls, &lastPowerOn)
 		//	fmt.Println("After", time.Since(start))
-		<-tx1
-		//	fmt.Println("End", time.Since(start))
+		cancel()
+		<-forever
+		<-sleep
+		//fmt.Println("End", time.Since(start))
 	}
 }
 
@@ -70,13 +110,13 @@ func TimeAtUnix(interval int) int {
 	//	fmt.Println("Unix Milli: ", timeUnix.UnixMilli(), "\nFormat:", timeUnix)
 	return TimeToInt(timeUnix)
 }
-func TimeToInt(time time.Time) int {
-	return int(time.UnixMilli())
+func TimeToInt(t time.Time) int {
+	return int(t.UnixMilli())
 }
 func EgoUrlIsEmpty(baseUrl, curUrl string) bool {
 	return baseUrl == curUrl
 }
-func MeasureData(dGyData []DiscovergyData, egoStatus EgoStatus, lastNegative *CheckLastNegativePower, egoUrls StructEgoData) {
+func MeasureData(dGyData []DiscovergyData, egoStatus EgoStatus, lastNegative *CheckLastNegativePower, egoUrls StructEgoData, powerOn *time.Time) {
 	if len(dGyData) == 0 {
 		log.Fatal("Keine Daten von Discovergy")
 	}
@@ -97,14 +137,14 @@ func MeasureData(dGyData []DiscovergyData, egoStatus EgoStatus, lastNegative *Ch
 	egoSetBaseUrl := egoUrls.EGO_URL_SET + "?"
 	queryList := []string{}
 	DecreasePower(lastPower, egoStatus, &queryList)
-	IncreasePower(min, egoStatus, &queryList)
-	TurnOnPower(min, egoStatus, &queryList)
+	IncreasePower(min, egoStatus, &queryList, powerOn)
+	TurnOnPower(min, egoStatus, &queryList, powerOn)
 	TurnOffPower(lastPower, egoStatus, lastNegative, dGyData[len(dGyData)-1], &queryList)
 	egoUrlSetString := MakeEgoUrlSet(egoSetBaseUrl, queryList)
 	if !EgoUrlIsEmpty(egoSetBaseUrl, egoUrlSetString) {
 		fmt.Println(time.Now())
 		fmt.Println("Set => ", egoUrlSetString)
-		msg, err := MakeGetRequest(NewRequestConfig(egoSetBaseUrl))
+		msg, err := MakeGetRequest(NewRequestConfig(egoUrlSetString))
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -160,9 +200,12 @@ func (a *CheckLastNegativePower) CheckIfBelowMinimum(currentPower int64, egoStat
 func (a CheckLastNegativePower) TimeExceeded() bool {
 	return time.Since(a.beginCheck) > time.Duration(5*time.Minute) && a.checkCurrent
 }
-func IncreasePower(powerNet int64, es EgoStatus, queryList *[]string) {
+func IncreasePower(powerNet int64, es EgoStatus, queryList *[]string, lastPoweredOn *time.Time) {
 	// Stromstärke nicht öndern, wenn n Minuten Minimium der alten Stromstärke entstrpicht
 	// oder keinen Überschuss gibt.
+	if time.Since(*lastPoweredOn) < 5*time.Minute {
+		return
+	}
 	if powerNet <= 0 {
 		return
 	}
@@ -179,7 +222,7 @@ func IncreasePower(powerNet int64, es EgoStatus, queryList *[]string) {
 	fmt.Println("Hochgeschaltet auf", powerMin, "um", time.Now())
 	EgoUrlSetUpdate(queryList, "amp", Itoa(int(powerMin)))
 }
-func TurnOnPower(powerNet int64, es EgoStatus, queryList *[]string) {
+func TurnOnPower(powerNet int64, es EgoStatus, queryList *[]string, powerOn *time.Time) {
 	powerMin := checkPowerMax(powerNet)
 	//fmt.Printf("TurnOnPower: %v\n", powerMin)
 	if powerMin < 6 {
@@ -191,6 +234,7 @@ func TurnOnPower(powerNet int64, es EgoStatus, queryList *[]string) {
 		fmt.Println("Angeschaltet um ", time.Now())
 		fmt.Printf("aktuell niedrigste Stromstärke: %v\n", powerMin)
 		EgoUrlSetUpdate(queryList, "frc", "2")
+		*powerOn = time.Now()
 	}
 }
 func CurrentStatus() {

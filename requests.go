@@ -77,4 +77,3 @@ func (a RequestConfig) WithUserLogin(ul UserLogin) RequestConfig {
 	a.UserLogin = ul
 	return a
 }
-

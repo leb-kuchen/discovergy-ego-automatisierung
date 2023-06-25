@@ -1,0 +1,36 @@
+[discovergy]
+username = ""
+password = ""
+url = "https://api.discovergy.com/public/v1"
+meterd_id = ""
+
+[ego]
+# lower priority is executed first
+# falls back to higher priority if an error is encountered 
+# if enable_fallback is set, the default api is ignored
+default = "local"
+enable_fallback = true
+
+local.url = ""
+local.priority = 1
+local.active = true
+
+http1.api_key = ""
+http1.priority = 2
+http1.active = true
+
+http2.api_key = ""
+http2.priority = 3
+http2.active = true
+
+http3.api_key = "" 
+http3.priority = 4
+http3.active = true
+
+#available durations: nanos, millis, secs, minutes, hours, days, weeks
+
+[run]
+power_on_after = 5
+duration_type = "minutes"
+
+
