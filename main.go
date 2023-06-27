@@ -21,7 +21,7 @@ import (
 // option to change data
 
 func main() {
-	interval := 5
+	interval := 1
 	updateTimer := time.Duration(1 * time.Second)
 	warnTimer := time.Duration(10 * time.Second)
 	timeoutTimer := time.Duration(time.Minute * 10)
