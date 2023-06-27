@@ -214,7 +214,7 @@ func IncreasePower(powerNet int64, es EgoStatus, queryList *[]string, lastPowere
 	}
 
 	// n Minuten Minimum + aktuelle Stromstörke ist die neue Stromstärke.
-	powerMin := checkPowerMax(powerNet)
+	powerMin := checkPowerMax(powerNet + es.Amp)
     fmt.Println(powerMin)
 	if es.curEqNewPower(powerMin) {
 		return
