@@ -214,7 +214,8 @@ func IncreasePower(powerNet int64, es EgoStatus, queryList *[]string, lastPowere
 	}
 
 	// n Minuten Minimum + aktuelle Stromstörke ist die neue Stromstärke.
-	powerMin := checkPowerMax(powerNet + es.Amp)
+	powerMin := checkPowerMax(powerNet)
+    fmt.Println(powerMin)
 	if es.curEqNewPower(powerMin) {
 		return
 	}
@@ -223,7 +224,7 @@ func IncreasePower(powerNet int64, es EgoStatus, queryList *[]string, lastPowere
 	EgoUrlSetUpdate(queryList, "amp", Itoa(int(powerMin)))
 }
 func TurnOnPower(powerNet int64, es EgoStatus, queryList *[]string, powerOn *time.Time) {
-	powerMin := checkPowerMax(powerNet)
+	powerMin := checkPowerMax(powerNet + es.Amp)
 	//fmt.Printf("TurnOnPower: %v\n", powerMin)
 	if powerMin < 6 {
 		return
