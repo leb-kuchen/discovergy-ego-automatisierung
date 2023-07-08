@@ -24,6 +24,8 @@ func main() {
 	lastCheck := newCheckLastNegativePower(false)
 	egoUrls := NewStructEgoData()
 	statusUrl := egoUrls.status("amp", "psm", "frc", "lcctc", "alw")
+	shelly := NewShelly(SHELLY_BASE_URL)
+
 	for {
 		tx1 := make(chan int)
 		tx2 := make(chan EgoStatus)
@@ -36,10 +38,12 @@ func main() {
 		}()
 		go getEgoStatus(statusUrl, tx2)
 		go ParseDiscovergy(timeInt, tx3)
+		//go shelly.MakeRequest()
 		dGyData := <-tx3
 		egoStatusStruct := <-tx2
 		//fmt.Println("Befor Parse", time.Since(start))
 		MeasureData(dGyData, egoStatusStruct, &lastCheck, egoUrls)
+		shelly.MakeRequest(dGyData[len(dGyData)-1].Values)
 		//	fmt.Println("After", time.Since(start))
 		<-tx1
 		//	fmt.Println("End", time.Since(start))
